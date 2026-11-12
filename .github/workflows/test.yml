@@ -1,0 +1,25 @@
+name: runner-test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test.yml"
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: uname -a
+  mac-arm:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - run: sw_vers && ls -d /Applications/Xcode*.app
+  mac-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 5
+    steps:
+      - run: sw_vers && ls -d /Applications/Xcode*.app
