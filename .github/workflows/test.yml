@@ -1,5 +1,8 @@
 name: runner-test
 
+# Which kind of Intel Mac job does GitHub actually hand a machine to?
+# Four jobs that differ only in the settings the real kernel build uses.
+
 on:
   workflow_dispatch:
   push:
@@ -8,18 +11,31 @@ on:
       - ".github/workflows/test.yml"
 
 jobs:
-  linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - run: uname -a
-  mac-arm:
-    runs-on: macos-15
-    timeout-minutes: 5
-    steps:
-      - run: sw_vers && ls -d /Applications/Xcode*.app
-  mac-intel:
+  intel-5min:
     runs-on: macos-15-intel
     timeout-minutes: 5
     steps:
-      - run: sw_vers && ls -d /Applications/Xcode*.app
+      - run: sw_vers
+
+  intel-120min:
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - run: sw_vers
+
+  intel-no-timeout:
+    runs-on: macos-15-intel
+    steps:
+      - run: sw_vers
+
+  intel-like-build:
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: sw_vers && ls -d /Applications/Xcode*.app && ls xnu/patches | tail -n 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runner-test
+          path: README.md
+          retention-days: 1
