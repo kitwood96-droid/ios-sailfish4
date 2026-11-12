@@ -38,7 +38,7 @@ jobs:
     # macos-15 starts at Xcode 16.0, whose iig emits IORPC.kernelContent;
     # xnu/patches/0184-xcode16-iig-kernelcontent.patch backports that field.
     # The Deps step below selects the oldest Xcode on the image (16.0).
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
