@@ -1,0 +1,86 @@
+sailfish wlan: resend handshake msg 4/4, answer a repeated msg 3/4
+
+Seen with a TP-Link AP: msg 4/4 got no tx completion within 1 s, the AP
+repeated msg 3/4, and wl_rekey() took that for a PTK rekey and dropped
+the link (rejoin loop, Settings spins). Send msg 4 up to four times
+while its completion stays out, and answer a repeated msg 3 with msg 4.
+
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2557,6 +2557,38 @@
+ /* The PTK (KCK, KEK, TK) and the AP's last replay counter, for group rekeys. */
+ static uint8_t wl_ptk[48], wl_replay[8];
+ 
++/*
++ * Handshake msg 4/4 for the msg 3/4 with this replay counter, MIC under the
++ * current PTK. The AP repeats msg 3 until it has seen msg 4, so the frame is
++ * sent again while its tx completion stays out.
++ */
++static bool
++wl_send_m4(const uint8_t *replay, const char *why)
++{
++	static uint8_t r[EK_DATA];
++	uint8_t mic[20];
++	bool sent = false;
++	uint32_t tries = 0;
++	bzero(r, sizeof(r));
++	r[0] = 1;
++	r[1] = 3;
++	r[3] = EK_DATA - 4;
++	r[4] = 2;
++	r[EK_INFO] = 0x03;                              /* secure | MIC | pairwise | v2 */
++	r[EK_INFO + 1] = 0x0a;
++	memcpy(r + EK_REPLAY, replay, 8);
++	wl_hmac_sha1(wl_ptk, 16, r, sizeof(r), NULL, 0, mic);
++	memcpy(r + EK_MIC, mic, 16);
++	uint16_t txc0 = wl_txc_n, id0 = wl_tx_id;
++	while (!sent && tries < 4) {
++		tries++;
++		sent = wl_data_tx(wl_bss.bssid, 0x888e, r, sizeof(r)) && wl_tx_wait(300);
++	}
++	printf("SAILFISH WLAN: 4/4 (%s) %s after %u tries (tx status %u, ids %u..%u, completions %u)\n", why,
++	    sent ? "sent" : "SEND FAILED", tries, wl_txc_status, (uint16_t)(id0 + 1), wl_tx_id, (uint16_t)(wl_txc_n - txc0));
++	return sent;
++}
++
+ /* GTK KDE in unwrapped key data kd (len bytes): key and id; false if absent. */
+ static bool
+ wl_gtk(const uint8_t *kd, uint32_t len, uint8_t gtk[16], uint8_t *id)
+@@ -2641,18 +2673,7 @@
+ 			    wl_gtk(kd, dlen - 8, gtk, &gtk_id);
+ 			memcpy(rsc, e + EK_RSC, 8);
+ 			memcpy(wl_replay, e + EK_REPLAY, 8);
+-			uint32_t rl = EK_DATA;
+-			bzero(r, rl);
+-			r[0] = 1;
+-			r[1] = 3;
+-			r[3] = EK_DATA - 4;
+-			r[4] = 2;
+-			r[EK_INFO] = 0x03;                      /* secure | MIC | pairwise | v2 */
+-			r[EK_INFO + 1] = 0x0a;
+-			memcpy(r + EK_REPLAY, e + EK_REPLAY, 8);
+-			wl_hmac_sha1(ptk, 16, r, rl, NULL, 0, mic);
+-			memcpy(r + EK_MIC, mic, 16);
+-			bool sent = wl_data_tx(wl_bss.bssid, 0x888e, r, rl) && wl_tx_wait(1000);
++			bool sent = wl_send_m4(e + EK_REPLAY, "handshake");
+ 			printf("SAILFISH WLAN: EAPOL 3/4 (info %#x, GTK %s id %u) -> 4/4 %s (tx status %u)\n", info, gtk_ok ? "ok" : "MISSING",
+ 			    gtk_id, sent ? "sent" : "SEND FAILED", wl_txc_status);
+ 			done = gtk_ok && wl_install_key(0, 0, ptk + 32, NULL) && wl_install_key(gtk_id, 1, gtk, rsc);
+@@ -2687,6 +2708,17 @@
+ 	if (e[1] != 3 || elen > n || elen < EK_DATA || EK_DATA + dlen > elen) {
+ 		return true;
+ 	}
++	if ((info & 0x1c8u) == 0x1c8u) {                /* msg 3/4 again: the AP has not seen our msg 4 */
++		memcpy(got, e + EK_MIC, 16);
++		bzero(e + EK_MIC, 16);
++		wl_hmac_sha1(wl_ptk, 16, e, elen, NULL, 0, mic);
++		if (memcmp(mic, got, 16) == 0) {
++			memcpy(wl_replay, e + EK_REPLAY, 8);
++			(void)wl_send_m4(e + EK_REPLAY, "repeated 3/4");
++			return true;
++		}
++		printf("SAILFISH WLAN: repeated 3/4 with another MIC\n");
++	}
+ 	if (info & 0x8u) {
+ 		printf("SAILFISH WLAN: EAPOL pairwise key info %#x while connected (PTK rekey)\n", info);
+ 		return false;
