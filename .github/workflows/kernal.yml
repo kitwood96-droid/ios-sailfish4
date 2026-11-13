@@ -30,9 +30,9 @@ env:
 jobs:
   build:
     # GitHub retired macos-14 (the last image with Xcode 15) on 2026-11-02.
-    # macos-15 starts at Xcode 16.0, whose iig emits IORPC.kernelContent;
-    # xnu/patches/0184-xcode16-iig-kernelcontent.patch backports that field.
-    # The Deps step below selects the oldest Xcode on the image (16.0).
+    # macos-15 starts at Xcode 16.0. Its iig does not emit IORPC.kernelContent
+    # yet (checked in the generated *.iig.cpp of kernel run #1), so xnu-8796
+    # builds unpatched as long as the Deps step selects that oldest Xcode.
     # macos-15-intel: the arm64 pool was out of capacity (jobs never acquired).
     runs-on: macos-15-intel
     timeout-minutes: 120
@@ -73,6 +73,8 @@ jobs:
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
         run: |
+          # without pipefail, tee hides a failed build and the step goes green
+          set -o pipefail
           bash build.sh 2>&1 | tee build.log
           # build.sh only warns when a patch does not apply: refuse a stale kernel
           if grep -E 'Skipping patch .*/0[0-9]{3}-' build.log; then
@@ -121,6 +123,9 @@ jobs:
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+          # the full log, so a failure can be read without the Actions UI
+          gzip -9 -c dxb/build.log > out/build.log.gz || true
+          grep -nE 'error:|\*\*\* \[' dxb/build.log | grep -v 'Skipping patch' | head -n 200 > out/errors.txt || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -128,3 +133,8 @@ jobs:
           name: xnu-kernel
           path: out/
           if-no-files-found: warn
+
+      - name: Check that a kernel was built
+        if: always()
+        run: |
+          ls -l out/kernel.development.* || { echo "error: no kernel was produced" >&2; cat out/errors.txt; exit 1; }
