@@ -1,0 +1,93 @@
+name: sweetgl
+
+# Builds tools/sweetgl (Mesa freedreno for iOS arm64 + the EAGL shim) into
+# sweetgl.dylib, the way tools/sweetgl/mesa-setup.sh and build.sh do on the
+# author's Mac, but on a GitHub runner with Xcode 16.0.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_rev:
+        description: Mesa commit (mesa.patch matches main of 2026-10-19 and mesa-26.3.0)
+        default: 44fd0fde8187b5bb1e919625f1ba24cb36c18cbc
+
+env:
+  MESA_REV: ${{ inputs.mesa_rev || '44fd0fde8187b5bb1e919625f1ba24cb36c18cbc' }}
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain layout the scripts expect (research/)
+        run: |
+          set -euo pipefail
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          echo "Xcode: $XC"
+          mkdir -p research/xcode15 research/tools/bin tools/sweetgl/out
+          # the scripts hard-code research/xcode15/Xcode.app
+          ln -s "$XC" research/xcode15/Xcode.app
+          export DEVELOPER_DIR=$XC/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          ls "$DEVELOPER_DIR/Platforms/iPhoneOS.platform/Developer/SDKs"
+          # Mesa needs a newer bison/flex than macOS ships; build.sh needs truncate
+          brew install bison flex coreutils ninja
+          ln -s "$(brew --prefix bison)/bin/bison" research/tools/bin/bison
+          ln -s "$(brew --prefix flex)/bin/flex" research/tools/bin/flex
+          ln -s "$(brew --prefix coreutils)/bin/gtruncate" research/tools/bin/truncate
+          python3 -m venv research/tools/venv
+          research/tools/venv/bin/pip install -q meson mako pyyaml packaging
+          research/tools/venv/bin/meson --version
+          # the cross file carries the author's absolute paths and SDK version
+          sed -i '' \
+            -e "s|/Volumes/SamsungSSD/ios-sailfish|$GITHUB_WORKSPACE|g" \
+            -e 's|iPhoneOS17\.5\.sdk|iPhoneOS.sdk|g' tools/sweetgl/ios-cross.txt
+          cat tools/sweetgl/ios-cross.txt
+
+      - name: Fetch Mesa
+        run: |
+          set -euo pipefail
+          git init -q research/mesa
+          cd research/mesa
+          git fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git "$MESA_REV" ||
+            git fetch -q --depth 1 https://github.com/mesa3d/mesa.git "$MESA_REV"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='%H %ad %s'
+          git apply ../../tools/sweetgl/mesa.patch
+          git status --short
+
+      - name: Configure Mesa
+        run: |
+          set -o pipefail
+          sh tools/sweetgl/mesa-setup.sh 2>&1 | tee tools/sweetgl/out/meson-setup.log
+
+      - name: Build sweetgl.dylib
+        run: |
+          set -o pipefail
+          sh tools/sweetgl/build.sh 2>&1 | tee tools/sweetgl/out/build.log
+          cd tools/sweetgl/out
+          ls -l
+          file sweetgl-unpadded.dylib
+          otool -L sweetgl-unpadded.dylib
+          codesign -dv sweetgl-unpadded.dylib 2>&1 || true
+          shasum -a 256 sweetgl-unpadded.dylib sweetgl.dylib | tee SHA256SUMS
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p artifact
+          cp tools/sweetgl/out/*.log tools/sweetgl/out/SHA256SUMS artifact/ 2>/dev/null || true
+          cp research/mesa-ios/meson-logs/meson-log.txt artifact/ 2>/dev/null || true
+          # the padded file is 64 MiB of mostly zeros; ship the unpadded one and pad locally
+          cp tools/sweetgl/out/sweetgl-unpadded.dylib artifact/ 2>/dev/null || true
+          ls -l artifact
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sweetgl
+          path: artifact/
+          if-no-files-found: warn
