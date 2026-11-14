@@ -1,0 +1,51 @@
+sailfish wlan: do not reuse msdu ids the firmware still holds
+
+With 31 frames out and no completion for 50 ms, wl_htt_tx() reset its
+count and reused their ids. Under a burst of traffic that crashed the
+QCA6174 firmware (FW_IND 0x3). Drop the frame instead; only after 5 s
+without any completion are the outstanding frames taken for lost.
+
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2423,14 +2423,40 @@
+ static bool
+ wl_htt_tx(const uint8_t *fr, uint32_t len, bool mgmt)
+ {
+-	/* A free slot: wait for completions while 31 frames are out (a lost completion times out). */
++	/*
++	 * A free slot: wait for completions while 31 frames are out. The firmware
++	 * still holds those msdu ids (off channel for a scan, the AP not
++	 * answering, ...): the frame is dropped rather than an id used twice,
++	 * which crashed the firmware. Only when no completion at all arrives for
++	 * 5 s are they taken for lost.
++	 */
++	static uint64_t wl_tx_full_since;
++	static uint16_t wl_tx_full_txc;
++	static uint32_t wl_tx_full_drops;
+ 	for (uint64_t end = wl_ms() + 50; (uint16_t)(wl_tx_id - wl_txc_n) >= WL_TXSLOTS - 1;) {
+ 		if (wl_ms() >= end) {
++			if (!wl_tx_full_since || wl_tx_full_txc != wl_txc_n) {
++				wl_tx_full_since = wl_ms();
++				wl_tx_full_txc = wl_txc_n;
++			}
++			if (wl_ms() - wl_tx_full_since < 5000) {
++				if ((wl_tx_full_drops++ & 63u) == 0) {
++					printf("SAILFISH WLAN: tx: %u frames out and no free slot, dropping (%u so far)\n",
++					    (uint16_t)(wl_tx_id - wl_txc_n), wl_tx_full_drops);
++				}
++				return false;
++			}
++			printf("SAILFISH WLAN: tx: no completion for 5 s with %u frames out, taking them for lost\n",
++			    (uint16_t)(wl_tx_id - wl_txc_n));
+ 			wl_txc_n = wl_tx_id;
++			wl_tx_full_since = 0;
+ 			break;
+ 		}
+ 		(void)wl_htc_poll(1);
+ 	}
++	if ((uint16_t)(wl_tx_id - wl_txc_n) < WL_TXSLOTS - 1) {
++		wl_tx_full_since = 0;
++	}
+ 	uint16_t flags1 = (uint16_t)((mgmt ? 17u : 16u) << 6 | 1u << 11), id = ++wl_tx_id;
+ 	uint32_t slot = id % WL_TXSLOTS, fo = D_TXF + 2048 * slot, lo = D_TXFRAG + 16 * slot;
+ 	uint8_t *f = (uint8_t *)(wl_dma + fo), *p = wl_htc_tx_payload(&ce4);
